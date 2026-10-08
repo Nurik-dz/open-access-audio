@@ -315,7 +315,7 @@ export const HistoryDrawer: React.FC<Props> = ({
                             {item.text || item.title}
                           </span>
                           <span className="text-[10px] font-mono text-neutral-500">
-                            {item.voiceOrModel || 'Open-Access LTX-Video'} • {item.durationSec ? `${item.durationSec}s` : '24fps MP4'}
+                            {item.voiceOrModel || 'Video'} • {item.durationSec ? `${item.durationSec}s` : '24fps MP4'}
                           </span>
                         </div>
                         <div className="flex items-center gap-2 self-start sm:self-auto">

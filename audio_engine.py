@@ -1,3 +1,11 @@
+"""
+Open-Access Audio Engine.
+
+Used two ways:
+  * CLI (what the web app does): ``python audio_engine.py <action> [args]`` prints a
+    single JSON object on stdout. Run it with no arguments to see usage.
+  * HTTP (optional): ``uvicorn audio_engine:app`` serves a small FastAPI layer.
+"""
 import os
 import sys
 import json
@@ -7,14 +15,20 @@ import asyncio
 import subprocess
 import requests
 import urllib.parse
-import speech_recognition as sr
 import contextlib
 import numpy as np
 import scipy.io.wavfile as wavfile
 import scipy.signal as signal
-from typing import Optional
+from typing import Optional, Tuple
 
-# Pydantic & FastAPI optional integration
+# Upper bound for any single ffmpeg invocation (seconds).
+FFMPEG_TIMEOUT = int(os.environ.get("FFMPEG_TIMEOUT_SEC", "180"))
+# Longest stretch of reference audio analysed for pitch/timbre (seconds).
+MAX_ANALYSIS_SECONDS = 30
+
+# Pydantic & FastAPI are only needed for the optional HTTP layer. Importing FastAPI
+# costs noticeable start-up time, and the web app spawns a fresh process per request,
+# so skip it when running as a CLI.
 try:
     from pydantic import BaseModel
 except ImportError:
@@ -23,14 +37,13 @@ except ImportError:
             for k, v in kwargs.items():
                 setattr(self, k, v)
 
-try:
-    from fastapi import FastAPI, BackgroundTasks, HTTPException, Body
-    from fastapi.responses import FileResponse, JSONResponse
-except ImportError:
-    FastAPI = None
-    BackgroundTasks = None
-    FileResponse = None
-    JSONResponse = None
+FastAPI = BackgroundTasks = HTTPException = FileResponse = None
+if __name__ != "__main__":
+    try:
+        from fastapi import FastAPI, BackgroundTasks, HTTPException
+        from fastapi.responses import FileResponse
+    except ImportError:
+        pass
 
 # Suppress Gradio client info banners from contaminating stdout
 @contextlib.contextmanager
@@ -67,18 +80,25 @@ def normalize_to_pcm_wav(input_file: str, sample_rate: int = 24000) -> str:
     to a guaranteed valid 16-bit PCM Mono WAV file.
     """
     output_wav = os.path.join(TEMP_DIR, f"norm_{uuid.uuid4().hex}.wav")
-    conv_res = subprocess.run(
-        [
-            'ffmpeg', '-y', '-v', 'error',
-            '-i', input_file,
-            '-ar', str(sample_rate),
-            '-ac', '1',
-            '-c:a', 'pcm_s16le',
-            output_wav
-        ],
-        capture_output=True,
-        text=True
-    )
+    try:
+        conv_res = subprocess.run(
+            [
+                'ffmpeg', '-y', '-v', 'error',
+                '-i', input_file,
+                '-ar', str(sample_rate),
+                '-ac', '1',
+                '-c:a', 'pcm_s16le',
+                output_wav
+            ],
+            capture_output=True,
+            text=True,
+            timeout=FFMPEG_TIMEOUT
+        )
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg is not installed or not on PATH.")
+    except subprocess.TimeoutExpired:
+        cleanup_file(output_wav)
+        raise RuntimeError("FFmpeg audio normalization timed out.")
     if conv_res.returncode != 0 or not os.path.exists(output_wav) or os.path.getsize(output_wav) == 0:
         cleanup_file(output_wav)
         raise RuntimeError(f"FFmpeg audio normalization failed: {conv_res.stderr.strip() or 'Invalid audio data'}")
@@ -92,8 +112,11 @@ def extract_acoustic_profile(wav_path: str):
     sr, data = wavfile.read(wav_path)
     if data.ndim > 1:
         data = data[:, 0]
+    # Pitch tracking is O(frames * window^2); cap the analysed span so a long
+    # upload cannot stall the request.
+    data = data[: int(sr * MAX_ANALYSIS_SECONDS)]
     data = data.astype(np.float32)
-    max_val = np.max(np.abs(data))
+    max_val = np.max(np.abs(data)) if len(data) else 0.0
     if max_val > 0:
         data = data / max_val
 
@@ -103,17 +126,18 @@ def extract_acoustic_profile(wav_path: str):
     num_frames = (len(data) - frame_len) // hop_len
 
     if num_frames <= 0 or duration_sec < 0.2:
+        # Too short to measure: report neutral defaults and flag them as such.
         return {
             'pitch_hz': 150.0,
-            'pitch_label': '150 Hz (Neutral Voice)',
+            'pitch_label': '150 Hz (Default - sample too short to measure)',
             'centroid_hz': 1800.0,
             'timbre': 'Balanced Natural',
             'donor_voice': 'en-US-AndrewMultilingualNeural',
             'pitch_offset': '+0Hz',
             'rate_offset': '+0%',
             'eq_gain_db': 0.0,
-            'gender': 'male',
-            'similarity_score': 95.0
+            'gender': 'neutral',
+            'measured': False
         }
 
     frames = np.array([data[i * hop_len : i * hop_len + frame_len] for i in range(num_frames)])
@@ -180,48 +204,34 @@ def extract_acoustic_profile(wav_path: str):
         'rate_offset': '+0%',
         'eq_gain_db': eq_gain,
         'gender': gender,
-        'similarity_score': 96.5
+        'measured': True
     }
 
 async def run_tts_async(text: str, voice: str = "en-US-AndrewMultilingualNeural", rate: str = "+0%", pitch: str = "+0Hz", volume: str = "+0%", output_path: str = None):
+    # Use the edge_tts API directly rather than shelling out to its CLI: argparse
+    # would treat text beginning with "-" as an option, and we save a process spawn.
+    import edge_tts
+
     if not output_path:
         output_path = os.path.join(TEMP_DIR, f"tts_{uuid.uuid4().hex}.mp3")
-    
-    cmd = [
-        sys.executable,
-        "-m", "edge_tts",
-        "--voice", voice,
-        f"--rate={rate}",
-        f"--pitch={pitch}",
-        f"--volume={volume}",
-        "--text", text,
-        "--write-media", output_path
-    ]
-    
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+
+    communicate = edge_tts.Communicate(
+        text=text,
+        voice=voice or "en-US-AndrewMultilingualNeural",
+        rate=rate or "+0%",
+        pitch=pitch or "+0Hz",
+        volume=volume or "+0%"
     )
-    stdout, stderr = await proc.communicate()
-    
-    if proc.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-        import edge_tts
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=voice or "en-US-AndrewMultilingualNeural",
-            rate=rate or "+0%",
-            pitch=pitch or "+0Hz",
-            volume=volume or "+0%"
-        )
-        await communicate.save(output_path)
-    
+    await communicate.save(output_path)
+
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
         raise RuntimeError("TTS generation resulted in empty output file.")
-    
+
     return output_path
 
 def run_stt(input_file: str, language: str = "en-US"):
+    import speech_recognition as sr  # lazy: only STT needs it
+
     normalized_wav = None
     try:
         normalized_wav = normalize_to_pcm_wav(input_file, sample_rate=16000)
@@ -243,6 +253,8 @@ def run_stt(input_file: str, language: str = "en-US"):
 def synthesize_acoustic_clone(normalized_ref_wav: str, text_to_speak: str, output_path: str, pitch_adj_hz: int = 0, timbre_adj_db: float = 0.0):
     profile = extract_acoustic_profile(normalized_ref_wav)
     total_pitch_offset = profile['pitch_offset']
+    pitch_adj_hz = int(max(-100, min(100, pitch_adj_hz)))
+    timbre_adj_db = float(max(-12.0, min(12.0, timbre_adj_db)))
     if pitch_adj_hz != 0:
         current_offset_val = int(profile['pitch_offset'].replace('Hz', '').replace('+', ''))
         new_offset = current_offset_val + pitch_adj_hz
@@ -279,11 +291,15 @@ def synthesize_acoustic_clone(normalized_ref_wav: str, text_to_speak: str, outpu
         '-ac', '1',
         output_path
     ]
-    subprocess.run(conv_cmd, capture_output=True)
-    cleanup_file(temp_mp3)
+    try:
+        conv = subprocess.run(conv_cmd, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Acoustic voice synthesis timed out in FFmpeg.")
+    finally:
+        cleanup_file(temp_mp3)
 
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-        raise RuntimeError("Acoustic voice synthesis failed to produce output.")
+        raise RuntimeError(f"Acoustic voice synthesis failed to produce output. {conv.stderr.strip()}")
 
     return output_path, profile
 
@@ -292,6 +308,7 @@ def run_clone(reference_audio_path: str, text_to_speak: str, ref_text: str = "",
         output_path = os.path.join(TEMP_DIR, f"clone_{uuid.uuid4().hex}.wav")
     
     normalized_ref_wav = None
+    remote_error = None
     try:
         normalized_ref_wav = normalize_to_pcm_wav(reference_audio_path, sample_rate=24000)
         profile = extract_acoustic_profile(normalized_ref_wav)
@@ -328,6 +345,7 @@ def run_clone(reference_audio_path: str, text_to_speak: str, ref_text: str = "",
                 profile['method'] = 'Zero-Shot Diffusion (F5-TTS)'
                 return output_path, ref_text, profile
             except Exception as e_hf:
+                remote_error = str(e_hf)[:300]
                 print(f"[Clone Notice] Remote GPU space note: {e_hf}, using local acoustic cloning engine...", file=sys.stderr)
 
         out_path, profile = synthesize_acoustic_clone(
@@ -337,7 +355,11 @@ def run_clone(reference_audio_path: str, text_to_speak: str, ref_text: str = "",
             pitch_adj_hz=pitch_adj,
             timbre_adj_db=timbre_adj
         )
-        profile['method'] = 'Acoustic Voice Model'
+        # Be explicit: the local path picks the closest stock Edge voice and applies
+        # pitch/EQ. It is a voice *match*, not a zero-shot clone.
+        profile['method'] = 'Acoustic Voice Match (stock voice + pitch/EQ)'
+        if remote_error:
+            profile['remote_error'] = remote_error
         return out_path, ref_text, profile
 
     finally:
@@ -556,10 +578,14 @@ def generate_procedural_foley_fallback(prompt: str, duration: float, output_path
     wavfile.write(output_path, sr, int_data)
     return output_path
 
-def run_sfx(prompt: str, hf_token: Optional[str] = None, duration: float = 5.0, guidance_scale: float = 3.5, output_path: Optional[str] = None) -> str:
+def run_sfx(prompt: str, hf_token: Optional[str] = None, duration: float = 5.0, guidance_scale: float = 3.5, output_path: Optional[str] = None) -> Tuple[str, dict]:
     """
-    1. POST /api/sfx: Short Foley/Action sound generation via haoheliu/audioldm2-text2audio-text2music
+    Short Foley/Action sound generation via haoheliu/audioldm2-text2audio-text2music
+    when a Hugging Face token is supplied, otherwise (or on failure) procedural synthesis.
+
+    Returns (output_path, info) where info["method"] says what actually produced the audio.
     """
+    remote_error = None
     if not output_path:
         output_path = os.path.join(TEMP_DIR, f"sfx_{uuid.uuid4().hex}.wav")
 
@@ -594,18 +620,26 @@ def run_sfx(prompt: str, hf_token: Optional[str] = None, duration: float = 5.0, 
                     src = src["video"]
 
                 shutil.copy(str(src), output_path)
-                return output_path
+                return output_path, {"method": "audioldm2"}
         except Exception as e_hf:
+            remote_error = str(e_hf)[:300]
             print(f"[SFX Notice] Remote Gradio space: {e_hf}. Using procedural acoustic synthesis...", file=sys.stderr)
 
-    # High-definition procedural synthesis engine
+    # Keyword-driven procedural synthesis (offline fallback)
     generate_procedural_foley_fallback(prompt, duration=duration, output_path=output_path)
-    return output_path
+    info = {"method": "procedural"}
+    if remote_error:
+        info["remote_error"] = remote_error
+    return output_path, info
 
-def run_ambient(prompt: str, hf_token: Optional[str] = None, seconds_total: float = 10.0, steps: int = 100, output_path: Optional[str] = None) -> str:
+def run_ambient(prompt: str, hf_token: Optional[str] = None, seconds_total: float = 10.0, steps: int = 100, output_path: Optional[str] = None) -> Tuple[str, dict]:
     """
-    2. POST /api/ambient: Continuous environmental sounds via stabilityai/stable-audio-open-1.0
+    Continuous environmental sounds via stabilityai/stable-audio-open-1.0 when a Hugging
+    Face token is supplied, otherwise (or on failure) procedural synthesis.
+
+    Returns (output_path, info) where info["method"] says what actually produced the audio.
     """
+    remote_error = None
     if not output_path:
         output_path = os.path.join(TEMP_DIR, f"ambient_{uuid.uuid4().hex}.wav")
 
@@ -636,36 +670,38 @@ def run_ambient(prompt: str, hf_token: Optional[str] = None, seconds_total: floa
                     src = src["value"]
 
                 shutil.copy(str(src), output_path)
-                return output_path
+                return output_path, {"method": "stable-audio-open"}
         except Exception as e_hf:
+            remote_error = str(e_hf)[:300]
             print(f"[Ambient Notice] Remote Gradio space: {e_hf}. Using procedural ambient synthesis...", file=sys.stderr)
 
-    # Ambient procedural sound generator
+    # Ambient procedural sound generator (offline fallback)
     generate_procedural_foley_fallback(prompt, duration=seconds_total, output_path=output_path)
-    return output_path
+    info = {"method": "procedural"}
+    if remote_error:
+        info["remote_error"] = remote_error
+    return output_path, info
 
 def list_voices():
+    """Return Edge TTS voices as [{id, name, gender, locale, friendlyName}]."""
     try:
-        proc = subprocess.run([sys.executable, "-m", "edge_tts", "--list-voices"], capture_output=True, text=True)
-        lines = proc.stdout.strip().split("\n")
+        import edge_tts
+        raw = asyncio.run(edge_tts.list_voices())
         voices = []
-        for line in lines:
-            if line.startswith("Name:"):
-                parts = line.split()
-                voice_name = parts[1] if len(parts) > 1 else ""
-                gender = "Unknown"
-                if "Gender: Female" in line:
-                    gender = "Female"
-                elif "Gender: Male" in line:
-                    gender = "Male"
-                locale = voice_name.split("-")[0] + "-" + voice_name.split("-")[1] if "-" in voice_name else "en-US"
-                voices.append({
-                    "id": voice_name,
-                    "name": voice_name.split("-")[-1].replace("Neural", ""),
-                    "gender": gender,
-                    "locale": locale,
-                    "friendlyName": f"{voice_name.split('-')[-1].replace('Neural', '')} ({locale})"
-                })
+        for v in raw:
+            voice_name = v.get("ShortName") or v.get("Name") or ""
+            if not voice_name:
+                continue
+            locale = v.get("Locale") or "en-US"
+            short = voice_name.split("-")[-1].replace("Neural", "")
+            gender = v.get("Gender") if v.get("Gender") in ("Female", "Male") else "Unknown"
+            voices.append({
+                "id": voice_name,
+                "name": short,
+                "gender": gender,
+                "locale": locale,
+                "friendlyName": f"{short} ({locale})"
+            })
         return voices
     except Exception as e:
         print(f"[Warning] Failed to list voices: {e}", file=sys.stderr)
@@ -717,7 +753,7 @@ def ensure_web_compatible_mp4(raw_input: str, output_path: str) -> str:
         temp_target
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT)
         if proc.returncode == 0 and os.path.exists(temp_target) and os.path.getsize(temp_target) > 0:
             if same_file:
                 shutil.move(temp_target, output_path)
@@ -746,14 +782,23 @@ def generate_video_open(
     base_model: str = "epiCRealism",
     steps: int = 4,
     resolution: str = "720p"
-) -> str:
+) -> Tuple[str, dict]:
     """
-    Generates authentic neural diffusion video from text prompts.
-    Uses ByteDance AnimateDiff-Lightning (ZeroGPU neural diffusion) generating 32+ multi-frame
-    fluid physical dynamics (water, fire, character actions, camera flight), with FFmpeg
-    lanczos HD upscaling, frame interpolation (24fps), seamless duration looping, and
-    synchronized atmospheric soundscape synthesis.
+    Text-to-video using free public Hugging Face Spaces, with an offline fallback.
+
+    Order of attempts:
+      1. ByteDance/AnimateDiff-Lightning: a short (~1.6s) neural clip that is looped,
+         upscaled and frame-interpolated with FFmpeg to the requested duration.
+      2. Other Spaces (CogVideoX, LTX-Video, ...) when a token is supplied.
+      3. Fallback: two Pollinations stills cross-dissolved with FFmpeg (NOT neural video).
+
+    A faint low-frequency hum is mixed in as an audio bed so the file has a track.
+
+    Returns (output_path, info). info["method"] is one of "animatediff-lightning",
+    "space:<name>" or "keyframe-morph"; info["remote_error"] explains why neural
+    generation was skipped when the fallback was used.
     """
+    remote_errors = []
     if not output_path:
         output_path = os.path.join(TEMP_DIR, f"temp_vid_{uuid.uuid4().hex}.mp4")
 
@@ -784,6 +829,8 @@ def generate_video_open(
     raw_gradio_video = None
     try:
         print(f"[Video Gen] Launching AnimateDiff-Lightning Neural Diffusion (Base: {selected_base}, Motion: {selected_motion or 'Natural'}, Steps: {selected_steps})...", file=sys.stderr)
+        if Client is None:
+            raise RuntimeError("gradio_client is not installed (pip install gradio_client)")
         client_kwargs = {}
         if token:
             client_kwargs["token"] = token.strip()
@@ -846,17 +893,18 @@ def generate_video_open(
                 "-movflags", "+faststart",
                 processed_tmp
             ]
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, timeout=FFMPEG_TIMEOUT)
             ensure_web_compatible_mp4(processed_tmp, output_path)
             cleanup_file(processed_tmp)
             print(f"[Video Gen] Successfully outputted enhanced neural diffusion video to {output_path}", file=sys.stderr)
-            return output_path
-            
+            return output_path, {"method": "animatediff-lightning", "model": f"AnimateDiff-Lightning ({selected_base})"}
+
     except Exception as e_diff:
+        remote_errors.append(f"AnimateDiff-Lightning: {str(e_diff)[:200]}")
         print(f"[Video Gen Notice] AnimateDiff-Lightning pass exception: {e_diff}", file=sys.stderr)
 
     # 3. Fallback: Secondary ZeroGPU Spaces (if token supplied or AnimateDiff queue busy)
-    if token:
+    if token and Client is not None:
         spaces_to_try = [
             ("prithivMLmods/NAVA-Text-to-Video", "/predict"),
             ("THUDM/CogVideoX-5B", "/generate"),
@@ -892,13 +940,14 @@ def generate_video_open(
                     ensure_web_compatible_mp4(raw_space_tmp, output_path)
                     cleanup_file(raw_space_tmp)
                     print(f"[Video Gen] Successfully retrieved video from {space_name}: {output_path}", file=sys.stderr)
-                    return output_path
+                    return output_path, {"method": f"space:{space_name}", "model": space_name}
             except Exception as e_sp:
                 if raw_space_tmp:
                     cleanup_file(raw_space_tmp)
+                remote_errors.append(f"{space_name}: {str(e_sp)[:120]}")
                 print(f"[Video Gen] Space {space_name} request note: {e_sp}", file=sys.stderr)
 
-    # 4. Multi-Frame Dynamic Morphing & Physics Engine (if all cloud neural GPU queues are unavailable)
+    # 4. Offline fallback: cross-dissolve between two stills (if every neural queue is unavailable)
     raw_synth_path = os.path.join(TEMP_DIR, f"raw_synth_{uuid.uuid4().hex}.mp4")
     frame1_path = os.path.join(TEMP_DIR, f"vidframe1_{uuid.uuid4().hex}.jpg")
     frame2_path = os.path.join(TEMP_DIR, f"vidframe2_{uuid.uuid4().hex}.jpg")
@@ -949,7 +998,7 @@ def generate_video_open(
             raw_synth_path
         ]
         
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT)
         if proc.returncode != 0 or not os.path.exists(raw_synth_path):
             print(f"[FFmpeg Morph Notice] {proc.stderr}, using single frame scale...", file=sys.stderr)
             cmd_fallback = [
@@ -960,313 +1009,321 @@ def generate_video_open(
                 "-movflags", "+faststart",
                 raw_synth_path
             ]
-            subprocess.run(cmd_fallback, check=True)
+            subprocess.run(cmd_fallback, check=True, timeout=FFMPEG_TIMEOUT)
 
         ensure_web_compatible_mp4(raw_synth_path, output_path)
-        return output_path
+        info = {"method": "keyframe-morph", "model": "Keyframe cross-dissolve (fallback)"}
+        if remote_errors:
+            info["remote_error"] = " | ".join(remote_errors)[:500]
+        return output_path, info
     finally:
         cleanup_file(frame1_path)
         cleanup_file(frame2_path)
         cleanup_file(raw_synth_path)
 
+MAX_IMAGE_DIM = 2048
+
+
 def generate_image_pollinations(prompt: str, output_path: Optional[str] = None, width: int = 1080, height: int = 1920) -> str:
     """
-    Fetches an image from the open-access Pollinations endpoint.
-    Optimized for high-quality vertical 1080x1920 resolution without watermark.
+    Fetches an image from the open-access Pollinations endpoint (no API key needed).
+    Dimensions are clamped to a sane range and the response must actually be an image.
     """
     if not output_path:
         output_path = os.path.join(TEMP_DIR, f"temp_img_{uuid.uuid4().hex}.jpg")
-    
-    safe_prompt = urllib.parse.quote(prompt.strip())
+
+    width = max(64, min(MAX_IMAGE_DIM, int(width)))
+    height = max(64, min(MAX_IMAGE_DIM, int(height)))
+    safe_prompt = urllib.parse.quote(prompt.strip(), safe="")
     url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={width}&height={height}&nologo=true"
-    
+
     response = requests.get(url, timeout=45)
     response.raise_for_status()
-    
+    content_type = response.headers.get("Content-Type", "")
+    if not content_type.startswith("image/") or not response.content:
+        raise RuntimeError(f"Image service returned an unexpected response ({content_type or 'no content type'}).")
+
     with open(output_path, "wb") as f:
         f.write(response.content)
-        
+
     return output_path
+
+# ----------------- Optional FastAPI App Layer (uvicorn audio_engine:app) -----------------
+
+class SfxRequest(BaseModel):
+    prompt: str
+    hf_token: Optional[str] = None
+    duration: Optional[float] = 5.0
+    guidance_scale: Optional[float] = 3.5
+
+class AmbientRequest(BaseModel):
+    prompt: str
+    hf_token: Optional[str] = None
+    seconds_total: Optional[float] = 10.0
+    steps: Optional[int] = 100
+
+class ImageRequest(BaseModel):
+    prompt: str
+    width: Optional[int] = 1080
+    height: Optional[int] = 1920
+
+class VideoRequest(BaseModel):
+    prompt: str
+    hf_token: Optional[str] = None
+    negative_prompt: Optional[str] = "low quality, blurry, distorted, jitter, artifact"
+    seconds: Optional[float] = 4.0
+    motion_style: Optional[str] = "zoom"  # zoom, pan, orbit, tilt-up, ...
 
 if FastAPI is not None:
     app = FastAPI(title="Open-Access Audio & Sound Effects Engine")
 
+    def _file_response(path: str, media_type: str, background_tasks, filename: Optional[str] = None):
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            cleanup_file(path)
+            raise HTTPException(status_code=500, detail="Generation produced no output.")
+        background_tasks.add_task(cleanup_file, path)
+        return FileResponse(path, media_type=media_type, filename=filename)
+
+    # These are plain `def` handlers on purpose: they block on ffmpeg / network, and
+    # FastAPI runs sync handlers in a worker thread instead of stalling the event loop.
     @app.post("/api/image")
-    async def generate_image(request: ImageRequest, background_tasks: BackgroundTasks):
-        """
-        POST /api/image
-        Generates visual assets dynamically via open-access Pollinations.ai.
-        Saves the binary image and returns a FileResponse with media_type="image/jpeg".
-        Cleans up local temporary file immediately using BackgroundTasks.
-        """
-        output_filename = os.path.join(TEMP_DIR, f"temp_img_{uuid.uuid4().hex}.jpg")
+    def generate_image(request: ImageRequest, background_tasks: BackgroundTasks):
+        out = os.path.join(TEMP_DIR, f"temp_img_{uuid.uuid4().hex}.jpg")
         try:
-            safe_prompt = urllib.parse.quote(request.prompt)
-            url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width={request.width or 1080}&height={request.height or 1920}&nologo=true"
-            
-            response = requests.get(url, timeout=45)
-            response.raise_for_status()
-            
-            with open(output_filename, "wb") as f:
-                f.write(response.content)
-                
-            background_tasks.add_task(cleanup_file, output_filename)
-            return FileResponse(output_filename, media_type="image/jpeg")
-            
+            generate_image_pollinations(request.prompt, out, request.width or 1080, request.height or 1920)
+            return _file_response(out, "image/jpeg", background_tasks)
+        except HTTPException:
+            raise
         except Exception as e:
-            cleanup_file(output_filename)
+            cleanup_file(out)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/video")
-    async def generate_video_endpoint(request: VideoRequest, background_tasks: BackgroundTasks):
-        """
-        POST /api/video
-        Generates video assets from prompt via open model space / pipeline.
-        Saves the resulting .mp4 file and returns FileResponse with media_type="video/mp4".
-        Cleans up local temporary file immediately using BackgroundTasks.
-        """
-        output_filename = os.path.join(TEMP_DIR, f"temp_vid_{uuid.uuid4().hex}.mp4")
+    def generate_video_endpoint(request: VideoRequest, background_tasks: BackgroundTasks):
+        out = os.path.join(TEMP_DIR, f"temp_vid_{uuid.uuid4().hex}.mp4")
         try:
             generate_video_open(
                 prompt=request.prompt,
                 hf_token=request.hf_token,
                 negative_prompt=request.negative_prompt,
-                output_path=output_filename,
-                seconds=request.seconds or 4.0
+                output_path=out,
+                seconds=request.seconds or 4.0,
+                motion_style=request.motion_style or "zoom",
             )
-            if not os.path.exists(output_filename) or os.path.getsize(output_filename) == 0:
-                raise HTTPException(status_code=500, detail="Failed to synthesize video asset.")
-
-            background_tasks.add_task(cleanup_file, output_filename)
-            return FileResponse(output_filename, media_type="video/mp4")
+            return _file_response(out, "video/mp4", background_tasks)
+        except HTTPException:
+            raise
         except Exception as e:
-            cleanup_file(output_filename)
+            cleanup_file(out)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/sfx")
-    async def api_sfx_endpoint(payload: SfxRequest, background_tasks: BackgroundTasks):
-        """
-        POST /api/sfx
-        Generates short Foley / Action sound effects using haoheliu/audioldm2-text2audio-text2music.
-        Returns the resulting .wav file and schedules immediate cleanup with BackgroundTasks.
-        """
+    def api_sfx_endpoint(payload: SfxRequest, background_tasks: BackgroundTasks):
         if not payload.prompt or not payload.prompt.strip():
             raise HTTPException(status_code=400, detail="Prompt is required for sound effect generation.")
-
-        output_wav = os.path.join(TEMP_DIR, f"sfx_{uuid.uuid4().hex}.wav")
-
+        out = os.path.join(TEMP_DIR, f"sfx_{uuid.uuid4().hex}.wav")
         try:
             run_sfx(
                 prompt=payload.prompt.strip(),
                 hf_token=payload.hf_token,
                 duration=payload.duration or 5.0,
                 guidance_scale=payload.guidance_scale or 3.5,
-                output_path=output_wav
+                output_path=out,
             )
-
-            if not os.path.exists(output_wav) or os.path.getsize(output_wav) == 0:
-                raise HTTPException(status_code=500, detail="Failed to synthesize sound effect.")
-
-            # Schedule cleanup after dispatch
-            background_tasks.add_task(cleanup_file, output_wav)
-
-            return FileResponse(
-                path=output_wav,
-                media_type="audio/wav",
-                filename=f"sfx_{uuid.uuid4().hex[:6]}.wav"
-            )
+            return _file_response(out, "audio/wav", background_tasks, f"sfx_{uuid.uuid4().hex[:6]}.wav")
+        except HTTPException:
+            raise
         except Exception as e:
-            cleanup_file(output_wav)
+            cleanup_file(out)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/ambient")
-    async def api_ambient_endpoint(payload: AmbientRequest, background_tasks: BackgroundTasks):
-        """
-        POST /api/ambient
-        Generates continuous environmental soundscapes using stabilityai/stable-audio-open-1.0.
-        Returns the resulting .wav file and schedules immediate cleanup with BackgroundTasks.
-        """
+    def api_ambient_endpoint(payload: AmbientRequest, background_tasks: BackgroundTasks):
         if not payload.prompt or not payload.prompt.strip():
             raise HTTPException(status_code=400, detail="Prompt is required for ambient soundscape generation.")
-
-        output_wav = os.path.join(TEMP_DIR, f"ambient_{uuid.uuid4().hex}.wav")
-
+        out = os.path.join(TEMP_DIR, f"ambient_{uuid.uuid4().hex}.wav")
         try:
             run_ambient(
                 prompt=payload.prompt.strip(),
                 hf_token=payload.hf_token,
                 seconds_total=payload.seconds_total or 10.0,
                 steps=payload.steps or 100,
-                output_path=output_wav
+                output_path=out,
             )
-
-            if not os.path.exists(output_wav) or os.path.getsize(output_wav) == 0:
-                raise HTTPException(status_code=500, detail="Failed to synthesize ambient audio.")
-
-            background_tasks.add_task(cleanup_file, output_wav)
-
-            return FileResponse(
-                path=output_wav,
-                media_type="audio/wav",
-                filename=f"ambient_{uuid.uuid4().hex[:6]}.wav"
-            )
+            return _file_response(out, "audio/wav", background_tasks, f"ambient_{uuid.uuid4().hex[:6]}.wav")
+        except HTTPException:
+            raise
         except Exception as e:
-            cleanup_file(output_wav)
+            cleanup_file(out)
             raise HTTPException(status_code=500, detail=str(e))
 else:
     app = None
 
 # ----------------- CLI Dispatcher -----------------
+#
+# Every action reads an optional JSON payload file (argv[2]) and prints exactly one JSON
+# object on stdout: {"success": true, ...} or {"success": false, "error": "..."}.
+# The Node server relies on that contract.
+
+def _load_payload(path: str) -> dict:
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def _action_tts(args):
+    data = _load_payload(args[0])
+    out = asyncio.run(run_tts_async(
+        text=data.get("text", ""),
+        voice=data.get("voice", "en-US-AndrewMultilingualNeural"),
+        rate=data.get("rate", "+0%"),
+        pitch=data.get("pitch", "+0Hz"),
+        volume=data.get("volume", "+0%"),
+        output_path=data.get("output_path"),
+    ))
+    return {"output_path": out}
+
+
+def _action_stt(args):
+    return {"text": run_stt(args[0], language=args[1] if len(args) > 1 else "en-US")}
+
+
+def _action_analyze(args):
+    norm_file = None
+    try:
+        norm_file = normalize_to_pcm_wav(args[0], sample_rate=24000)
+        profile = extract_acoustic_profile(norm_file)
+        # Transcription needs the network; the acoustic profile is still useful without it.
+        try:
+            profile['detected_text'] = run_stt(norm_file)
+        except Exception as e:
+            profile['detected_text'] = ""
+            profile['stt_error'] = str(e)[:300]
+        return {"profile": profile}
+    finally:
+        cleanup_file(norm_file)
+
+
+def _action_clone(args):
+    data = _load_payload(args[0])
+    out, used_ref_text, profile = run_clone(
+        reference_audio_path=data.get("ref_audio_path"),
+        text_to_speak=data.get("text", ""),
+        ref_text=data.get("ref_text", ""),
+        hf_token=data.get("hf_token"),
+        pitch_adj=int(data.get("pitch_adj", 0)),
+        timbre_adj=float(data.get("timbre_adj", 0.0)),
+        output_path=data.get("output_path"),
+    )
+    return {"output_path": out, "ref_text": used_ref_text, "profile": profile}
+
+
+def _action_sfx(args):
+    data = _load_payload(args[0])
+    out, info = run_sfx(
+        prompt=data.get("prompt", ""),
+        hf_token=data.get("hf_token"),
+        duration=float(data.get("duration", 5.0)),
+        guidance_scale=float(data.get("guidance_scale", 3.5)),
+        output_path=data.get("output_path"),
+    )
+    return {"output_path": out, **info}
+
+
+def _action_ambient(args):
+    data = _load_payload(args[0])
+    out, info = run_ambient(
+        prompt=data.get("prompt", ""),
+        hf_token=data.get("hf_token"),
+        seconds_total=float(data.get("seconds_total", 10.0)),
+        steps=int(data.get("steps", 100)),
+        output_path=data.get("output_path"),
+    )
+    return {"output_path": out, **info}
+
+
+def _action_image(args):
+    data = _load_payload(args[0])
+    out = generate_image_pollinations(
+        prompt=data.get("prompt", ""),
+        output_path=data.get("output_path"),
+        width=int(data.get("width", 1080)),
+        height=int(data.get("height", 1920)),
+    )
+    return {"output_path": out}
+
+
+def _action_video(args):
+    data = _load_payload(args[0])
+    out, info = generate_video_open(
+        prompt=data.get("prompt", ""),
+        hf_token=data.get("hf_token"),
+        negative_prompt=data.get("negative_prompt"),
+        output_path=data.get("output_path"),
+        seconds=float(data.get("seconds", 4.0)),
+        motion_style=data.get("motion_style", "zoom"),
+        base_model=data.get("base_model", "epiCRealism"),
+        steps=int(data.get("steps", 4)),
+        resolution=data.get("resolution", "720p"),
+    )
+    return {"output_path": out, **info}
+
+
+def _action_voices(_args):
+    return {"voices": list_voices()}
+
+
+def _action_check(_args):
+    """Report which optional runtime dependencies are available (used by /api/health)."""
+    import importlib.util
+
+    modules = ["numpy", "scipy", "requests", "edge_tts", "speech_recognition", "gradio_client"]
+    return {
+        "python": sys.version.split()[0],
+        "ffmpeg": shutil.which("ffmpeg") is not None,
+        "modules": {m: importlib.util.find_spec(m) is not None for m in modules},
+    }
+
+
+ACTIONS = {
+    "tts": (_action_tts, 1),
+    "stt": (_action_stt, 1),
+    "analyze": (_action_analyze, 1),
+    "clone": (_action_clone, 1),
+    "sfx": (_action_sfx, 1),
+    "ambient": (_action_ambient, 1),
+    "image": (_action_image, 1),
+    "video": (_action_video, 1),
+    "voices": (_action_voices, 0),
+    "check": (_action_check, 0),
+}
+
+
+def main(argv):
+    usage = f"Usage: audio_engine.py [{'|'.join(ACTIONS)}] [payload.json | input_file]"
+    if len(argv) < 2:
+        print(json.dumps({"success": False, "error": f"No action specified. {usage}"}))
+        return 1
+
+    action = argv[1]
+    entry = ACTIONS.get(action)
+    if entry is None:
+        print(json.dumps({"success": False, "error": f"Unknown action '{action}'. {usage}"}))
+        return 1
+
+    handler, required_args = entry
+    args = argv[2:]
+    if len(args) < required_args:
+        print(json.dumps({"success": False, "error": f"Action '{action}' requires an argument. {usage}"}))
+        return 1
+
+    try:
+        result = handler(args)
+        print(json.dumps({"success": True, **result}))
+        return 0
+    except Exception as e:
+        print(json.dumps({"success": False, "error": str(e)}))
+        return 1
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(json.dumps({"error": "No action specified. Usage: audio_engine.py [tts|stt|analyze|clone|voices|sfx|ambient]"}))
-        sys.exit(1)
-        
-    action = sys.argv[1]
-    
-    if action == "tts":
-        payload_file = sys.argv[2]
-        with open(payload_file, "r") as f:
-            data = json.load(f)
-        try:
-            out_file = asyncio.run(run_tts_async(
-                text=data.get("text", ""),
-                voice=data.get("voice", "en-US-AndrewMultilingualNeural"),
-                rate=data.get("rate", "+0%"),
-                pitch=data.get("pitch", "+0Hz"),
-                volume=data.get("volume", "+0%"),
-                output_path=data.get("output_path")
-            ))
-            print(json.dumps({"success": True, "output_path": out_file}))
-        except Exception as e:
-            print(json.dumps({"success": False, "error": str(e)}))
-            sys.exit(1)
-
-    elif action == "stt":
-        input_file = sys.argv[2]
-        lang = sys.argv[3] if len(sys.argv) > 3 else "en-US"
-        try:
-            transcript = run_stt(input_file, language=lang)
-            print(json.dumps({"success": True, "text": transcript}))
-        except Exception as e:
-            print(json.dumps({"success": False, "error": str(e)}))
-            sys.exit(1)
-
-    elif action == "analyze":
-        input_file = sys.argv[2]
-        norm_file = None
-        try:
-            norm_file = normalize_to_pcm_wav(input_file, sample_rate=24000)
-            profile = extract_acoustic_profile(norm_file)
-            transcript = run_stt(norm_file)
-            profile['detected_text'] = transcript
-            print(json.dumps({"success": True, "profile": profile}))
-        except Exception as e:
-            print(json.dumps({"success": False, "error": str(e)}))
-            sys.exit(1)
-        finally:
-            cleanup_file(norm_file)
-
-    elif action == "clone":
-        payload_file = sys.argv[2]
-        with open(payload_file, "r") as f:
-            data = json.load(f)
-        try:
-            out_file, used_ref_text, profile = run_clone(
-                reference_audio_path=data.get("ref_audio_path"),
-                text_to_speak=data.get("text", ""),
-                ref_text=data.get("ref_text", ""),
-                hf_token=data.get("hf_token"),
-                pitch_adj=data.get("pitch_adj", 0),
-                timbre_adj=data.get("timbre_adj", 0.0),
-                output_path=data.get("output_path")
-            )
-            print(json.dumps({
-                "success": True,
-                "output_path": out_file,
-                "ref_text": used_ref_text,
-                "profile": profile
-            }))
-        except Exception as e:
-            print(json.dumps({"success": False, "error": str(e)}))
-            sys.exit(1)
-
-    elif action == "sfx":
-        # python audio_engine.py sfx <payload_json_file>
-        payload_file = sys.argv[2]
-        with open(payload_file, "r") as f:
-            data = json.load(f)
-        try:
-            out_file = run_sfx(
-                prompt=data.get("prompt", ""),
-                hf_token=data.get("hf_token"),
-                duration=float(data.get("duration", 5.0)),
-                guidance_scale=float(data.get("guidance_scale", 3.5)),
-                output_path=data.get("output_path")
-            )
-            print(json.dumps({"success": True, "output_path": out_file}))
-        except Exception as e:
-            print(json.dumps({"success": False, "error": str(e)}))
-            sys.exit(1)
-
-    elif action == "ambient":
-        # python audio_engine.py ambient <payload_json_file>
-        payload_file = sys.argv[2]
-        with open(payload_file, "r") as f:
-            data = json.load(f)
-        try:
-            out_file = run_ambient(
-                prompt=data.get("prompt", ""),
-                hf_token=data.get("hf_token"),
-                seconds_total=float(data.get("seconds_total", 10.0)),
-                steps=int(data.get("steps", 100)),
-                output_path=data.get("output_path")
-            )
-            print(json.dumps({"success": True, "output_path": out_file}))
-        except Exception as e:
-            print(json.dumps({"success": False, "error": str(e)}))
-            sys.exit(1)
-
-    elif action == "image":
-        # python audio_engine.py image <payload_json_file>
-        payload_file = sys.argv[2]
-        with open(payload_file, "r") as f:
-            data = json.load(f)
-        try:
-            out_file = generate_image_pollinations(
-                prompt=data.get("prompt", ""),
-                output_path=data.get("output_path"),
-                width=int(data.get("width", 1080)),
-                height=int(data.get("height", 1920))
-            )
-            print(json.dumps({"success": True, "output_path": out_file}))
-        except Exception as e:
-            print(json.dumps({"success": False, "error": str(e)}))
-            sys.exit(1)
-
-    elif action == "video":
-        # python audio_engine.py video <payload_json_file>
-        payload_file = sys.argv[2]
-        with open(payload_file, "r") as f:
-            data = json.load(f)
-        try:
-            out_file = generate_video_open(
-                prompt=data.get("prompt", ""),
-                hf_token=data.get("hf_token"),
-                negative_prompt=data.get("negative_prompt"),
-                output_path=data.get("output_path"),
-                seconds=float(data.get("seconds", 4.0)),
-                motion_style=data.get("motion_style", "zoom"),
-                base_model=data.get("base_model", "epiCRealism"),
-                steps=int(data.get("steps", 4)),
-                resolution=data.get("resolution", "720p")
-            )
-            print(json.dumps({"success": True, "output_path": out_file}))
-        except Exception as e:
-            print(json.dumps({"success": False, "error": str(e)}))
-            sys.exit(1)
-
-    elif action == "voices":
-        voices = list_voices()
-        print(json.dumps({"success": True, "voices": voices}))
+    sys.exit(main(sys.argv))

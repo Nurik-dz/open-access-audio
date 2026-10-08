@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { AudioPlayer } from './AudioPlayer';
+import { FallbackNotice } from './FallbackNotice';
 
 interface Props {
   onAddToHistory: (item: Omit<HistoryItem, 'id' | 'timestamp'>) => void;
@@ -101,6 +102,7 @@ export const SfxPanel: React.FC<Props> = ({ onAddToHistory }) => {
   const [generatedAudio, setGeneratedAudio] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [genInfo, setGenInfo] = useState<{ method?: string; remoteError?: string } | null>(null);
 
   const handleGenerate = async () => {
     if (!prompt.trim()) {
@@ -110,12 +112,14 @@ export const SfxPanel: React.FC<Props> = ({ onAddToHistory }) => {
 
     setIsLoading(true);
     setErrorMsg(null);
+    setGenInfo(null);
     const startTime = performance.now();
 
+    const usingModel = hfToken.trim().length > 0;
     if (mode === 'sfx') {
-      setLoadingStep('Synthesizing Foley & Action acoustics via AudioLDM-2...');
+      setLoadingStep(usingModel ? 'Generating sound effect with AudioLDM-2...' : 'Synthesizing sound effect...');
     } else {
-      setLoadingStep('Synthesizing environmental continuous soundscape via Stable Audio...');
+      setLoadingStep(usingModel ? 'Generating soundscape with Stable Audio...' : 'Synthesizing soundscape...');
     }
 
     try {
@@ -151,14 +155,21 @@ export const SfxPanel: React.FC<Props> = ({ onAddToHistory }) => {
       const elapsed = Math.round(performance.now() - startTime);
       setLatencyMs(elapsed);
       setGeneratedAudio(audioUrl);
+      setGenInfo({ method: data.method, remoteError: data.remoteError });
+
+      const modelLabel =
+        data.method === 'procedural'
+          ? 'Procedural synthesizer (offline)'
+          : mode === 'sfx'
+            ? 'AudioLDM2 (Foley SFX)'
+            : 'Stable Audio Open (Ambient)';
 
       onAddToHistory({
         type: mode === 'sfx' ? 'sfx' : 'ambient',
         title: prompt.slice(0, 42) + (prompt.length > 42 ? '...' : ''),
         text: prompt.trim(),
         audioUrl: audioUrl,
-        voiceOrModel:
-          mode === 'sfx' ? 'AudioLDM2 (Foley SFX)' : 'Stable Audio Open (Ambient)',
+        voiceOrModel: modelLabel,
         durationSec: Math.round(mode === 'sfx' ? duration : secondsTotal),
       });
     } catch (err: any) {
@@ -332,7 +343,7 @@ export const SfxPanel: React.FC<Props> = ({ onAddToHistory }) => {
                 <span>Synthesis Controls</span>
               </div>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400">
-                {mode === 'sfx' ? 'AudioLDM-2' : 'Stable Audio'}
+                {hfToken.trim() ? (mode === 'sfx' ? 'AudioLDM-2' : 'Stable Audio') : 'Built-in synth'}
               </span>
             </div>
 
@@ -496,6 +507,13 @@ export const SfxPanel: React.FC<Props> = ({ onAddToHistory }) => {
             onDownloadFilename={`${mode === 'sfx' ? 'sfx' : 'ambient'}_${Date.now()}.wav`}
             autoPlay={true}
           />
+          {genInfo?.method === 'procedural' && (
+            <FallbackNotice title="Built-in procedural synthesizer" detail={genInfo.remoteError}>
+              This sound came from the offline keyword-driven synthesizer, not a neural model, so only a few prompt
+              keywords (knock, punch, footsteps, laser, rain, ...) change the result. Add a Hugging Face token to use{' '}
+              {mode === 'sfx' ? 'AudioLDM2' : 'Stable Audio Open'}.
+            </FallbackNotice>
+          )}
         </div>
       )}
     </div>

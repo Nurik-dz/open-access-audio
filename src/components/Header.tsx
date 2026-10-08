@@ -2,6 +2,14 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { Volume2, Mic, Sparkles, Clock, Zap, Radio, Server, Image as ImageIcon, Film } from 'lucide-react';
 import { SuiteTab } from '../types';
+import { useEngineStatus, EngineState } from '../utils/useEngineStatus';
+
+const ENGINE_BADGE: Record<EngineState, { label: string; box: string; dot: string }> = {
+  checking: { label: 'Checking Engine…', box: 'bg-white/5 border-white/10 text-neutral-400', dot: 'bg-neutral-400 animate-pulse' },
+  ok: { label: 'Engine Ready', box: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400', dot: 'bg-emerald-400' },
+  degraded: { label: 'Setup Needed', box: 'bg-amber-500/10 border-amber-500/20 text-amber-300', dot: 'bg-amber-400' },
+  offline: { label: 'Engine Offline', box: 'bg-red-500/10 border-red-500/20 text-red-300', dot: 'bg-red-400' },
+};
 
 interface Props {
   activeTab: SuiteTab;
@@ -16,6 +24,9 @@ export const Header: React.FC<Props> = ({
   historyCount,
   onOpenArchInfo,
 }) => {
+  const engine = useEngineStatus();
+  const badge = ENGINE_BADGE[engine.state];
+
   const navItems: { id: SuiteTab; label: string; icon: React.FC<{ className?: string }> }[] = [
     { id: 'tts', label: 'Speech Synthesis', icon: Volume2 },
     { id: 'clone', label: 'Voice Lab & Clone', icon: Sparkles },
@@ -99,9 +110,13 @@ export const Header: React.FC<Props> = ({
         {/* Right Status & Actions */}
         <div className="flex items-center gap-2.5">
           {/* Active Engine Badge */}
-          <div className="hidden lg:flex items-center gap-2 px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full text-[11px] font-medium text-emerald-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Neural Engine Active</span>
+          <div
+            id="engine-status-badge"
+            className={`hidden lg:flex items-center gap-2 px-3 py-1 border rounded-full text-[11px] font-medium ${badge.box}`}
+            title={engine.warnings.length ? engine.warnings.join('\n') : 'Audio engine and FFmpeg are available'}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
+            <span>{badge.label}</span>
           </div>
 
           {/* Engine Specs Modal Trigger */}

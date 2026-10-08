@@ -1,8 +1,10 @@
+numpy>=1.26
+scipy>=1.11
 edge-tts>=7.0.0
 SpeechRecognition>=3.10.0
-pydub>=0.25.1
 gradio_client>=1.0.0
+requests>=2.31.0
+# Optional: only needed to serve the engine as a standalone HTTP API
+# (uvicorn audio_engine:app). The web app itself talks to the engine via CLI.
 fastapi>=0.110.0
 uvicorn>=0.28.0
-python-multipart>=0.0.9
-requests>=2.31.0
