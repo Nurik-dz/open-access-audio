@@ -25,6 +25,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { HistoryItem } from '../types';
+import { FallbackNotice } from './FallbackNotice';
 
 interface Props {
   onAddToHistory: (item: Omit<HistoryItem, 'id' | 'timestamp'>) => void;
@@ -97,6 +98,8 @@ export const VideoPanel: React.FC<Props> = ({ onAddToHistory }) => {
     durationSec: number;
     fps: number;
     resolution: string;
+    method?: string;
+    remoteError?: string;
   } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -294,6 +297,8 @@ export const VideoPanel: React.FC<Props> = ({ onAddToHistory }) => {
         durationSec: data.durationSec || durationSec,
         fps: data.fps || 24,
         resolution: data.resolution || resolution,
+        method: data.method,
+        remoteError: data.remoteError,
       });
       setIsPlaying(true);
 
@@ -304,7 +309,7 @@ export const VideoPanel: React.FC<Props> = ({ onAddToHistory }) => {
         text: textPrompt,
         videoUrl: data.videoUrl,
         durationSec: data.durationSec || durationSec,
-        voiceOrModel: baseModel === 'ToonYou' ? 'AnimateDiff (ToonYou Anime)' : 'AnimateDiff-Lightning (epiCRealism)',
+        voiceOrModel: data.model || (baseModel === 'ToonYou' ? 'AnimateDiff (ToonYou Anime)' : 'AnimateDiff-Lightning (epiCRealism)'),
       });
     } catch (err: any) {
       console.error('[Video Gen Error]:', err);
@@ -346,7 +351,7 @@ export const VideoPanel: React.FC<Props> = ({ onAddToHistory }) => {
             </span>
           </h1>
           <p className="text-xs text-neutral-400 mt-1 max-w-2xl leading-relaxed">
-            Generate authentic multi-frame video with true fluid dynamics, character motion, physical physics, and cinematic lighting at 24fps.
+            Generate short clips with AnimateDiff-Lightning on free public Hugging Face Spaces: about 1.6 seconds of neural motion, looped and upscaled to your chosen length. If the free queue is unavailable, the app falls back to an image cross-dissolve and says so.
           </p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
@@ -827,7 +832,7 @@ export const VideoPanel: React.FC<Props> = ({ onAddToHistory }) => {
                   </div>
                   <div className="text-xs font-medium text-neutral-400">No Video Rendered Yet</div>
                   <div className="text-[11px] text-neutral-600 max-w-xs leading-relaxed">
-                    Enter a prompt and generate authentic neural diffusion video with true multi-frame fluid dynamics and character action.
+                    Enter a prompt to generate a short clip. If the free neural queue is busy, a simple image cross-dissolve is used instead and clearly labelled.
                   </div>
                 </div>
               )}
@@ -851,6 +856,14 @@ export const VideoPanel: React.FC<Props> = ({ onAddToHistory }) => {
                     </button>
                   </div>
                 </div>
+
+                {videoMeta.method === 'keyframe-morph' && (
+                  <FallbackNotice title="Not AI-generated motion" detail={videoMeta.remoteError}>
+                    The neural video queue was unavailable, so this clip is a cross-dissolve between two generated still
+                    images with a faint background tone. Try again later, or add a Hugging Face token under Advanced to
+                    skip the anonymous queue.
+                  </FallbackNotice>
+                )}
 
                 <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-neutral-400">
                   <span className="px-2 py-0.5 rounded bg-white/[0.04] border border-white/[0.08] text-cyan-300">

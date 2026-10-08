@@ -1,13 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Header } from './components/Header';
-import { TtsPanel } from './components/TtsPanel';
-import { SttPanel } from './components/SttPanel';
-import { ClonePanel } from './components/ClonePanel';
-import { SfxPanel } from './components/SfxPanel';
-import { VisualsPanel } from './components/VisualsPanel';
-import { VideoPanel } from './components/VideoPanel';
-import { HistoryDrawer } from './components/HistoryDrawer';
+import { IndeterminateLoader } from './components/IndeterminateLoader';
 import { ArchModal } from './components/ArchModal';
 import { SuiteTab, HistoryItem } from './types';
 import { ShieldCheck, Cpu, Volume2, Mic, Sparkles, Radio } from 'lucide-react';
@@ -19,6 +13,15 @@ import {
   clearAllHistoryFromStorage,
   purgeHistoryToStorage,
 } from './utils/storage';
+
+// Each tab is its own chunk, fetched the first time it is opened.
+const TtsPanel = lazy(() => import('./components/TtsPanel').then((m) => ({ default: m.TtsPanel })));
+const SttPanel = lazy(() => import('./components/SttPanel').then((m) => ({ default: m.SttPanel })));
+const ClonePanel = lazy(() => import('./components/ClonePanel').then((m) => ({ default: m.ClonePanel })));
+const SfxPanel = lazy(() => import('./components/SfxPanel').then((m) => ({ default: m.SfxPanel })));
+const VisualsPanel = lazy(() => import('./components/VisualsPanel').then((m) => ({ default: m.VisualsPanel })));
+const VideoPanel = lazy(() => import('./components/VideoPanel').then((m) => ({ default: m.VideoPanel })));
+const HistoryDrawer = lazy(() => import('./components/HistoryDrawer').then((m) => ({ default: m.HistoryDrawer })));
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<SuiteTab>('tts');
@@ -99,6 +102,7 @@ export default function App() {
 
       {/* Main Content Viewport */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8 flex flex-col gap-6 relative z-10">
+        <Suspense fallback={<IndeterminateLoader isLoading />}>
         <AnimatePresence mode="wait">
           {activeTab === 'tts' && (
             <motion.div
@@ -201,6 +205,7 @@ export default function App() {
             </motion.div>
           )}
         </AnimatePresence>
+        </Suspense>
       </main>
 
       {/* Persistent Bottom Studio Bar */}

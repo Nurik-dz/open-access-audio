@@ -23,6 +23,7 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { AudioPlayer } from './AudioPlayer';
+import { FallbackNotice } from './FallbackNotice';
 import { MicRecorder } from './MicRecorder';
 import { AudioWaveformTrimmer } from './AudioWaveformTrimmer';
 import { HistoryItem } from '../types';
@@ -44,9 +45,11 @@ interface AcousticProfile {
   rate_offset: string;
   eq_gain_db: number;
   gender: string;
-  similarity_score: number;
+  /** false when the sample was too short to measure and defaults were used. */
+  measured?: boolean;
   detected_text?: string;
   method?: string;
+  remote_error?: string;
 }
 
 const PRESET_REFERENCE_VOICES = [
@@ -349,7 +352,7 @@ export const ClonePanel: React.FC<Props> = ({ onAddToHistory, initialRefAudio, i
                 </span>
               </div>
               <p className="text-xs text-neutral-400 mt-0.5">
-                Clone vocal pitch, resonance, and timbre from any speech sample or mic recording.
+                Match the pitch and tone of any speech sample or mic recording, or add a Hugging Face token for zero-shot F5-TTS cloning.
               </p>
             </div>
 
@@ -540,9 +543,15 @@ export const ClonePanel: React.FC<Props> = ({ onAddToHistory, initialRefAudio, i
                     {isAnalyzing ? (
                       <span className="text-[10px] font-mono text-neutral-400 animate-pulse">Analyzing F0 & Formants...</span>
                     ) : acousticProfile ? (
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                        {acousticProfile.similarity_score}% Acoustic Match
-                      </span>
+                      acousticProfile.measured === false ? (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                          Sample too short • defaults used
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                          {Math.round(acousticProfile.pitch_hz)} Hz measured
+                        </span>
+                      )
                     ) : null}
                   </div>
 
@@ -749,10 +758,16 @@ export const ClonePanel: React.FC<Props> = ({ onAddToHistory, initialRefAudio, i
             <AudioPlayer
               src={generatedAudio}
               title={targetText.slice(0, 50) + (targetText.length > 50 ? '...' : '')}
-              subtitle={`Cloned Profile: ${lastResultProfile?.pitch_label || 'Acoustic Model'} (${lastResultProfile?.similarity_score || 95}% Match)`}
+              subtitle={`Voice profile: ${lastResultProfile?.pitch_label || 'Acoustic Model'}`}
               onDownloadFilename="cloned_voice_output.mp3"
               autoPlay={true}
             />
+            {lastResultProfile?.method?.startsWith('Acoustic Voice Match') && (
+              <FallbackNotice title="Voice match, not a zero-shot clone" detail={lastResultProfile.remote_error}>
+                This used the closest stock voice with pitch and EQ adjustments. For true zero-shot cloning, add a
+                Hugging Face token under Advanced so F5-TTS can run.
+              </FallbackNotice>
+            )}
           </motion.div>
         )}
       </div>
@@ -775,7 +790,7 @@ export const ClonePanel: React.FC<Props> = ({ onAddToHistory, initialRefAudio, i
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-white">Instant F0 Acoustic Matcher</span>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium">
-                  Zero Latency
+                  Runs locally
                 </span>
               </div>
               <p className="text-[11px] text-neutral-400 leading-relaxed mt-0.5">
