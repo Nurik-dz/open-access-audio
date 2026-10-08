@@ -1,75 +1,110 @@
-# Open-Access Audio Suite
+<div align="center">
+  <img src="https://raw.githubusercontent.com/lucide-icons/lucide/main/icons/audio-lines.svg" width="60" alt="ElevenOpen Studio Icon" />
+  
+  # ElevenOpen Studio
+  
+  **Open-Access Audio & Media Synthesis Suite**
+  
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+  [![React](https://img.shields.io/badge/React-18-blue.svg)](https://reactjs.org/)
+  [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
+  
+  <p align="center">
+    A comprehensive, open-source web application for audio and visual synthesis. Providing a unified, beautifully designed interface for various audio and media generation tasks, utilizing open-access neural models and procedural synthesis techniques.
+  </p>
+</div>
 
-A comprehensive open-source web application for audio and visual synthesis. This suite provides a unified interface for various audio and media generation tasks, utilizing open-access models and procedural synthesis techniques.
+<br />
 
-## Features
+<div align="center">
+  <img src="./assets/screenshot.png" alt="ElevenOpen Studio App Screenshot" width="800" style="border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);" />
+</div>
 
-- **Text-to-Speech (TTS):** Generate natural-sounding speech from text using high-quality voices.
-- **Voice Cloning:** Analyze and clone acoustic voice profiles from reference audio.
-- **Sound Effects (SFX) & Foley:** Generate high-fidelity procedural sound effects (e.g., footsteps, impacts, UI clicks, weather) or utilize text-to-audio models.
-- **Ambient Soundscapes:** Create continuous environmental audio backgrounds.
-- **Visual Synthesis:** Generate images and neural diffusion videos from text prompts.
+<br />
 
-## Architecture
+## 🌟 Key Features
 
-The project is built with a modern stack:
-- **Backend:** FastAPI (Python) and procedural audio engines (numpy, scipy).
-- **Frontend:** React, Vite, and Tailwind CSS.
-- **Media Processing:** FFmpeg for robust audio/video normalization and filtering.
+- **🗣️ Speech Synthesis (TTS):** Generate expressive, natural-sounding neural speech from text with zero latency using multilingual endpoints.
+- **🎙️ Voice Lab & Clone:** Analyze and extract acoustic profiles (F0, spectral centroid, timbre) to clone voices from reference audio.
+- **💥 Sound Effects & SFX:** Generate high-fidelity procedural Foley effects (e.g., footsteps, cinematic impacts, UI clicks) and neural text-to-audio.
+- **🌊 Ambient Soundscapes:** Create continuous, rich environmental backgrounds and deep acoustic soundscapes.
+- **🖼️ Visuals & Image:** Generate static visual assets dynamically using Pollinations API integrations.
+- **🎬 Video Studio:** Create authentic multi-frame neural diffusion video with true fluid dynamics, character motion, and cinematic lighting at 24fps.
+- **📝 Speech to Text:** Accurate transcription using integrated STT fallback capabilities.
 
-## Prerequisites
+## 🏗️ Architecture Under the Hood
 
-- Node.js (v18+ recommended)
-- Python 3.9+
-- FFmpeg (must be installed and available in system PATH)
+The project is built on a modern, decoupled architecture:
+- **Backend (Python):** Powered by **FastAPI** for high-performance API routing. Utilizes `numpy`, `scipy`, and `ffmpeg` for deep procedural audio manipulation, filtering, and normalization. Includes asynchronous Edge-TTS integrations.
+- **Frontend (TypeScript):** A responsive, dark-mode focused UI built with **React**, **Vite**, and **Tailwind CSS**.
+- **Media Pipeline:** Relies heavily on **FFmpeg** to guarantee output consistency across various audio codecs, resampling rates, and video encodings (H.264/WebM compatibility).
 
-## Getting Started
+## 🚀 Getting Started
+
+Follow these steps to get the studio running on your local machine.
+
+### Prerequisites
+
+- **Node.js** (v18 or higher recommended)
+- **Python** (3.9 or higher)
+- **FFmpeg** (Must be installed and accessible in your system `PATH`)
+
+---
 
 ### 1. Backend Setup
 
-Install the required Python dependencies:
+First, install the required Python dependencies.
 
 ```bash
+# It is recommended to use a virtual environment
 pip install -r requirements.txt
-# Ensure edge_tts and scipy are installed
-pip install edge-tts scipy
+
+# Ensure core audio engines are installed
+pip install edge-tts scipy numpy speechrecognition
 ```
 
 Start the FastAPI backend:
 ```bash
 python audio_engine.py
-# Or start via the provided unified server script if applicable
 ```
+*Note: The backend runs natively and handles heavy audio processing and neural network routing.*
 
 ### 2. Frontend Setup
 
-Install the Node.js dependencies:
+In a new terminal window, install the Node.js dependencies:
 
 ```bash
+# Using npm
 npm install
-# or
+
+# Or using bun
 bun install
 ```
 
-Set up your environment variables by copying the example file:
+Copy the environment variables template:
 ```bash
 cp .env.example .env
 ```
-*(Optionally, configure any required API keys in `.env`)*
+*(Optionally, add any specific API keys to your `.env` file).*
 
-Start the frontend development server:
+Start the Vite development server:
 ```bash
 npm run dev
-# or
-bun run dev
+# Or using bun: bun run dev
 ```
 
-The application will be available at `http://localhost:5173` (or the port specified by Vite).
+Your app will be live at `http://localhost:5173` (or the port displayed in your terminal).
 
-## Contributing
+## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request or open an Issue.
+Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
 
-## License
+1. Fork the Project
+2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the Branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
-This project is open-source and available under the MIT License.
+## 📜 License
+
+Distributed under the MIT License. See `LICENSE` for more information.
