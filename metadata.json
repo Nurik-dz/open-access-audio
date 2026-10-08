@@ -1,6 +1,5 @@
 {
-  "name": "Open-Access Audio Suite",
-  "description": "Zero-cost Text-to-Speech, Speech-to-Text, Voice Cloning, Sound Effects, Open-Access Visuals, and LTX-Video generation suite.",
-  "requestFramePermissions": ["microphone"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "name": "ElevenOpen Studio",
+  "description": "Open-access Text-to-Speech, Speech-to-Text, voice cloning, sound effects, image and short-video generation studio built on free public endpoints and local DSP.",
+  "requestFramePermissions": ["microphone"]
 }
