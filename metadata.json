@@ -1,0 +1,6 @@
+{
+  "name": "Open-Access Audio Suite",
+  "description": "Zero-cost Text-to-Speech, Speech-to-Text, Voice Cloning, Sound Effects, Open-Access Visuals, and LTX-Video generation suite.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
