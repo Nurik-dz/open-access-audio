@@ -1,0 +1,29 @@
+name: Mascot (Swift)
+
+on:
+  push:
+    paths:
+      - 'mascot/**'
+      - '.github/workflows/mascot.yml'
+  pull_request:
+    paths:
+      - 'mascot/**'
+      - '.github/workflows/mascot.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  swift:
+    name: Build and test on macOS, build for iOS
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: mascot
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - run: swift build
+      - run: swift test
+      - name: Build for iOS Simulator
+        run: xcodebuild -scheme Mascot -destination 'generic/platform=iOS Simulator' -skipPackagePluginValidation build

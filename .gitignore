@@ -16,3 +16,7 @@ venv/
 
 # Runtime scratch space (created on demand by the server / engine)
 temp_audio/
+
+# Swift
+.build/
+.swiftpm/
